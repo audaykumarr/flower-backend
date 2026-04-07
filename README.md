@@ -7,7 +7,7 @@
 
 ## 🚀 Live API
 
-https://audaykumarr-flower-backend-url.onrender.com
+https://audaykumarr-flower-backend.onrender.com/
 
 ---
 

@@ -1,152 +1,175 @@
 const express = require("express");
-const sqlite3 = require("sqlite3").verbose();
 const cors = require("cors");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-app.use(cors({
-  origin: "*"
-}));
+
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-const db = new sqlite3.Database("./flower.db");
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
 
-// Create tables
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS entries (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT,
-      total REAL,
-      final REAL,
-      commission REAL DEFAULT 10
-    )
-  `);
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      entry_id INTEGER,
-      day INTEGER,
-      kgs REAL,
-      price REAL,
-      amount REAL
-    )
-  `);
-});
-
-// Save entry
-app.post("/entries", (req, res) => {
-  const { items, total, final, commission } = req.body;
-
-  const date = new Date().toISOString();
-
-  db.run(
-    `INSERT INTO entries (date, total, final, commission) VALUES (?, ?, ?, ?)`,
-    [date, total, final, commission || 10],
-    function (err) {
-      if (err) return res.status(500).send(err);
-
-      const entryId = this.lastID;
-
-      items.forEach((item, index) => {
-        const kgs = item.kgs || 0;
-        const price = item.price || 0;
-        const amount = kgs > 0 && price > 0 ? kgs * price : 0;
-
-        db.run(
-          `INSERT INTO items (entry_id, day, kgs, price, amount)
-          VALUES (?, ?, ?, ?, ?)`,
-          [
-            entryId,
-            index + 1,
-            kgs,
-            price,
-            amount,
-          ]
-        );
-      });
-
-      res.send({ message: "Saved", entryId });
-    }
-  );
-});
-
-// Get all
 app.get("/", (req, res) => {
-  res.send("Flower Calculator API is running");
+  res.send("Flower Calculator API (Supabase) 🚀");
 });
 
-app.get("/entries", (req, res) => {
-  db.all(`SELECT * FROM entries ORDER BY id DESC`, [], (err, rows) => {
-    res.send(rows);
-  });
+app.post("/entries", async (req, res) => {
+  try {
+    const { items, total, final, commission } = req.body;
+
+    // Insert entry
+    const { data: entry, error } = await supabase
+      .from("entries")
+      .insert([
+        {
+          total,
+          final,
+          commission: commission || 10,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    const entryId = entry.id;
+
+    // Prepare items
+    const itemsData = items.map((item, index) => {
+      const kgs = item.kgs || 0;
+      const price = item.price || 0;
+      const amount = kgs > 0 && price > 0 ? kgs * price : 0;
+
+      return {
+        entry_id: entryId,
+        day: index + 1,
+        kgs,
+        price,
+        amount,
+      };
+    });
+
+    // Insert items
+    const { error: itemsError } = await supabase
+      .from("items")
+      .insert(itemsData);
+
+    if (itemsError) throw itemsError;
+
+    res.send({ message: "Saved", entryId });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(err);
+  }
 });
 
-// Get details
-app.get("/entries/:id", (req, res) => {
-  const id = req.params.id;
+app.get("/entries", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("entries")
+      .select("*")
+      .order("id", { ascending: false });
 
-  db.all(
-    `SELECT * FROM items WHERE entry_id = ? ORDER BY day ASC`,
-    [id],
-    (err, items) => {
-      if (err) return res.status(500).send(err);
-      res.send(items);
+    if (error) throw error;
+
+    res.send(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(err);
+  }
+});
+
+app.get("/entries/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data, error } = await supabase
+      .from("items")
+      .select("*")
+      .eq("entry_id", id)
+      .order("day");
+
+    if (error) throw error;
+
+    res.send(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(err);
+  }
+});
+
+app.put("/entries/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { items, commission } = req.body;
+
+    let total = 0;
+
+    // Update each item
+    for (const item of items) {
+      const kgs = item.kgs || 0;
+      const price = item.price || 0;
+      const amount = kgs > 0 && price > 0 ? kgs * price : 0;
+
+      total += amount;
+
+      await supabase
+        .from("items")
+        .update({
+          kgs,
+          price,
+          amount,
+        })
+        .eq("entry_id", id)
+        .eq("day", item.day);
     }
-  );
+
+    const commissionPercent = commission || 10;
+    const commissionValue = total * (commissionPercent / 100);
+    const final = Math.round(total - commissionValue);
+
+    // Update entry
+    const { error } = await supabase
+      .from("entries")
+      .update({
+        total,
+        final,
+        commission: commissionPercent,
+      })
+      .eq("id", id);
+
+    if (error) throw error;
+
+    res.send({ message: "Updated successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(err);
+  }
 });
 
-// UPDATE entry items (price update)
-app.put("/entries/:id", (req, res) => {
-  const id = req.params.id;
-  const { items, commission } = req.body;
+app.delete("/entries/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
 
-  let total = 0;
+    const { error } = await supabase
+      .from("entries")
+      .delete()
+      .eq("id", id);
 
-  items.forEach((item) => {
-    const kgs = item.kgs || 0;
-    const price = item.price || 0;
-    const amount = kgs > 0 && price > 0 ? kgs * price : 0;
+    if (error) throw error;
 
-    total += amount;
-
-    db.run(
-      `UPDATE items 
-       SET kgs = ?, price = ?, amount = ?
-       WHERE entry_id = ? AND day = ?`,
-      [kgs, price, amount, id, item.day]
-    );
-  });
-
-  const commissionPercent = commission || 10;
-  const commissionValue = total * (commissionPercent / 100);
-  const final = Math.round(total - commissionValue);
-
-  db.run(
-    `UPDATE entries 
-     SET total = ?, final = ?, commission = ?
-     WHERE id = ?`,
-    [total, final, commissionPercent, id],
-    (err) => {
-      if (err) return res.status(500).send(err);
-
-      res.send({ message: "Updated successfully" });
-    }
-  );
-});
-
-// Delete
-app.delete("/entries/:id", (req, res) => {
-  const id = req.params.id;
-
-  db.run(`DELETE FROM entries WHERE id = ?`, [id]);
-  db.run(`DELETE FROM items WHERE entry_id = ?`, [id]);
-
-  res.send({ message: "Deleted" });
+    res.send({ message: "Deleted" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(err);
+  }
 });
 
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT} 🚀`);
 });
